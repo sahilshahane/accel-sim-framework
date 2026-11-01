@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Pre-commit hook: runs the repo's clang-format scripts and re-stages any
+# staged files they changed. Works for both the Accel-Sim repo and the nested
+# GPGPU-Sim repo. Install with util/git-hooks/install.sh.
+# Skip once with: git commit --no-verify
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Pick the format scripts for whichever repo is committing
+if [ -f "$REPO_ROOT/gpu-simulator/format-code.sh" ]; then
+    ACCELSIM_ROOT_DIR="$REPO_ROOT"
+    FORMAT_SCRIPTS=(
+        "$REPO_ROOT/gpu-simulator/format-code.sh"
+        "$REPO_ROOT/util/tracer_nvbit/tracer_tool/format-code.sh"
+    )
+elif [ -f "$REPO_ROOT/format-code.sh" ]; then
+    ACCELSIM_ROOT_DIR="$(cd "$REPO_ROOT/../.." && pwd)"
+    FORMAT_SCRIPTS=("$REPO_ROOT/format-code.sh")
+else
+    exit 0
+fi
+
+# Only C/C++/CUDA files matter to clang-format
+STAGED=()
+while IFS= read -r -d '' f; do
+    STAGED+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- \
+    '*.h' '*.hpp' '*.cc' '*.cpp' '*.cu' '*.cuh')
+
+[ ${#STAGED[@]} -eq 0 ] && exit 0
+
+# The format scripts find clang-format via python3, so prefer the project venv
+if [ -x "$ACCELSIM_ROOT_DIR/.venv/bin/python3" ]; then
+    export PATH="$ACCELSIM_ROOT_DIR/.venv/bin:$PATH"
+fi
+
+# Files that are partially staged can't be safely re-staged after formatting
+PARTIAL=()
+for f in "${STAGED[@]}"; do
+    if ! git diff --quiet -- "$f"; then
+        PARTIAL+=("$f")
+    fi
+done
+
+for script in "${FORMAT_SCRIPTS[@]}"; do
+    [ -f "$script" ] && bash "$script"
+done
+
+CHANGED=()
+for f in "${STAGED[@]}"; do
+    if ! git diff --quiet -- "$f"; then
+        CHANGED+=("$f")
+    fi
+done
+
+[ ${#CHANGED[@]} -eq 0 ] && exit 0
+
+FULLY_STAGED=()
+for f in "${CHANGED[@]}"; do
+    if [[ " ${PARTIAL[*]} " != *" $f "* ]]; then
+        FULLY_STAGED+=("$f")
+    fi
+done
+
+if [ ${#FULLY_STAGED[@]} -gt 0 ]; then
+    git add -- "${FULLY_STAGED[@]}"
+    echo "pre-commit: re-staged formatted files:"
+    printf '  %s\n' "${FULLY_STAGED[@]}"
+fi
+
+if [ ${#PARTIAL[@]} -gt 0 ]; then
+    echo "pre-commit: these files were partially staged and got reformatted;"
+    echo "review and stage them again, then re-run the commit:"
+    printf '  %s\n' "${PARTIAL[@]}"
+    exit 1
+fi
